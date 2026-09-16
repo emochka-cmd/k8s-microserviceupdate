@@ -1,0 +1,122 @@
+<!-- index.html -->
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta
+        name="description"
+        content="Проверка текущей погоды по названию города"
+    >
+    <title>Погода</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+</head>
+
+<body>
+<main class="page">
+    <section class="weather-app" aria-labelledby="page-title">
+        <header class="header">
+            <div>
+                <p class="eyebrow">WEATHER SERVICE</p>
+                <h1 id="page-title">Погода</h1>
+                <p class="subtitle">
+                    Узнайте текущую погоду в любом городе
+                </p>
+            </div>
+        </header>
+
+        <form id="weather-form" class="search-form" novalidate>
+            <label class="sr-only" for="city">
+                Название города
+            </label>
+
+            <div class="search-row">
+                <input
+                    id="city"
+                    name="city"
+                    type="text"
+                    inputmode="text"
+                    autocomplete="address-level2"
+                    maxlength="100"
+                    placeholder="Например, Москва"
+                    required
+                    aria-describedby="form-message"
+                >
+
+                <button id="submit-button" type="submit">
+                    <span id="button-text">Узнать погоду</span>
+                    <span
+                        id="button-spinner"
+                        class="spinner"
+                        aria-hidden="true"
+                    ></span>
+                </button>
+            </div>
+
+            <p
+                id="form-message"
+                class="message"
+                role="status"
+                aria-live="polite"
+            ></p>
+        </form>
+
+        <section
+            id="weather-card"
+            class="weather-card"
+            aria-live="polite"
+            hidden
+        >
+            <div class="weather-main">
+                <div>
+                    <p id="weather-location" class="location"></p>
+                    <p id="weather-description" class="description"></p>
+                </div>
+
+                <div class="temperature">
+                    <span id="weather-temperature">—</span>
+                    <span>°C</span>
+                </div>
+            </div>
+
+            <dl class="weather-details">
+                <div class="detail">
+                    <dt>Ощущается</dt>
+                    <dd>
+                        <span id="weather-feels-like">—</span> °C
+                    </dd>
+                </div>
+
+                <div class="detail">
+                    <dt>Влажность</dt>
+                    <dd>
+                        <span id="weather-humidity">—</span> %
+                    </dd>
+                </div>
+
+                <div class="detail">
+                    <dt>Давление</dt>
+                    <dd>
+                        <span id="weather-pressure">—</span> hPa
+                    </dd>
+                </div>
+
+                <div class="detail">
+                    <dt>Ветер</dt>
+                    <dd>
+                        <span id="weather-wind">—</span> м/с
+                    </dd>
+                </div>
+            </dl>
+
+            <footer class="weather-footer">
+                <span id="weather-cache"></span>
+                <time id="weather-time"></time>
+            </footer>
+        </section>
+    </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# Build context is the repo root (docker build -f dockerfile-backend .).
+# Do not ignore backend/ or frontend/ files that Dockerfiles COPY.
+
+.git
+.gitignore
+.gitattributes
+.dockerignore
+
+# Helm chart is not part of the images
+project-chart/
+
+# Python junk
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.venv/
+venv/
+env/
+
+# Local secrets — keep them out of image layers
+.env
+.env.*
+secrets.yaml
+**/secrets.yaml
+
+# Editors and OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docs and local notes
+*.md
+LICENSE

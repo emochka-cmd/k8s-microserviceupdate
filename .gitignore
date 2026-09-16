@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets and local env — never commit
+.env
+.env.*
+!.env.example
+secrets.yaml
+**/secrets.yaml
+
+# Helm local artifacts
+*.tgz
+Chart.lock
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Cursor / local tooling
+.cursor/

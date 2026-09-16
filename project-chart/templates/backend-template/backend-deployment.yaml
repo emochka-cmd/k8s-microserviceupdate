@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: backend-deployment
+    namespace: {{ .Values.namespace.name }}
+    labels:
+        app: backend
+
+spec:
+    {{- if not .Values.backend.hpa.enabled }}
+    replicas: {{ .Values.backend.replicaCount }}
+    {{- end }}
+    selector:
+        # какими подами управляет
+        matchLabels:
+            app: backend
+    template:
+        metadata:
+            # само описание пода для selector
+            labels:
+                app: backend
+        spec:
+            containers:
+              - name: weather-backend
+                image: {{ printf "%s:%s" .Values.backend.containerName .Values.backend.containerVersion }}
+                imagePullPolicy: Never
+                ports:
+                    - containerPort: 5000
+                resources:
+                    requests:
+                        cpu: {{ .Values.backend.resources.requests.cpu }}
+                        memory: {{ .Values.backend.resources.requests.memory}}
+                    limits:
+                        cpu: {{ .Values.backend.resources.limits.cpu }}
+                        memory: {{ .Values.backend.resources.limits.memory }}
+                envFrom:
+                    - configMapRef:
+                          name: backend-config
+                env:
+                    - name: WEATHER_API_KEY
+                      valueFrom:
+                          secretKeyRef:
+                              name: {{ .Values.backend.secrets.name }}
+                              key: WEATHER_API_KEY
+                    - name: REDIS_PASSWORD
+                      valueFrom:
+                          secretKeyRef:
+                              name: {{ .Values.backend.secrets.name }}
+                              key: REDIS_PASSWORD
+                              optional: true

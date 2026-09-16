@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+    name: redis-statefull
+    namespace: {{ .Values.namespace.name }}
+    labels:
+        app: redis
+spec:
+    selector:
+        matchLabels:
+            app: redis
+    serviceName: redis
+    replicas: {{ .Values.redis.replicaCount }}
+    template:
+        metadata:
+            labels:
+                app: redis
+        spec:
+            containers:
+              - name: redis-container
+                image: {{ .Values.redis.image | quote }}
+                ports:
+                    - name: redis
+                      containerPort: {{ .Values.redis.port }}
+                env:
+                    - name: REDIS_PASSWORD
+                      valueFrom:
+                          secretKeyRef:
+                              name: {{ .Values.backend.secrets.name }}
+                              key: REDIS_PASSWORD
+                              optional: true
+                    - name: REDISCLI_AUTH
+                      valueFrom:
+                          secretKeyRef:
+                              name: {{ .Values.backend.secrets.name }}
+                              key: REDIS_PASSWORD
+                              optional: true
+                command:
+                    - sh
+                    - -c
+                    - |
+                      extra=""
+                      if [ -n "$REDIS_PASSWORD" ]; then
+                        extra="--requirepass $REDIS_PASSWORD"
+                      fi
+                      exec redis-server --appendonly yes --dir /data $extra
+                volumeMounts:
+                    - name: redis
+                      mountPath: {{ .Values.redis.persistence.mountPath }}
+                livenessProbe:
+                    exec:
+                        command: ["redis-cli", "ping"]
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+                readinessProbe:
+                    exec:
+                        command: ["redis-cli", "ping"]
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+                resources:
+                    requests:
+                        cpu: {{ .Values.redis.resources.requests.cpu | quote }}
+                        memory: {{ .Values.redis.resources.requests.memory | quote }}
+                    limits:
+                        cpu: {{ .Values.redis.resources.limits.cpu | quote }}
+                        memory: {{ .Values.redis.resources.limits.memory | quote }}
+            volumes:
+              - name: redis
+                hostPath:
+                    path: {{ .Values.redis.persistence.hostPath | quote }}
+                    type: DirectoryOrCreate

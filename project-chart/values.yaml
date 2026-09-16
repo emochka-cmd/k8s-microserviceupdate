@@ -1,0 +1,83 @@
+namespace:
+  name: weather-app
+
+backend:
+  replicaCount: 1
+  containerName: "fff"
+  containerVersion: "0.1"
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 50
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi  
+  config:
+    redisHost: "redis"
+    redisPort: "6379"
+    redisDb: "0"
+    redisSocketTimeout: "2"
+    cacheTtl: "600"
+    weatherApiBaseUrl: "https://api.openweathermap.org/data/2.5/weather"
+    weatherApiTimeout: "5"
+    weatherApiUnits: "metric"
+    corsOrigins: "*"
+    logLevel: "INFO"
+    port: "5000"
+    gunicornWorkers: "2"
+    gunicornThreads: "2"
+    gunicornTimeout: "30"
+  secrets:
+    # В проде всегда false: Helm не должен знать значение ключа.
+    # Secret создаётся вне чарта (kubectl/CI/External Secrets).
+    create: false
+    name: backend-secrets
+  service:
+    type: ClusterIP
+    port: 5000
+
+frontend:
+  replicaCount: 1
+  containerName: "frontend"
+  containerVersion: "0.1"
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 50
+  config:
+    listenPort: 8080
+    backendService: backend
+    backendPort: 5000
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+redis:
+  replicaCount: 1 # не ставить > 1. В таком случае перейти на
+  image: redis:7-alpine
+  port: 6379
+  persistence:
+    mountPath: /data
+    hostPath: /srv/redis
+  service:
+    port: 6379
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

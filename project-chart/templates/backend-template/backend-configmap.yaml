@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: backend-config
+    namespace: {{ .Values.namespace.name }}
+    labels:
+        app: backend
+data:
+    REDIS_HOST: {{ .Values.backend.config.redisHost | quote }}
+    REDIS_PORT: {{ .Values.backend.config.redisPort | quote }}
+    REDIS_DB: {{ .Values.backend.config.redisDb | quote }}
+    REDIS_SOCKET_TIMEOUT: {{ .Values.backend.config.redisSocketTimeout | quote }}
+    CACHE_TTL: {{ .Values.backend.config.cacheTtl | quote }}
+    WEATHER_API_BASE_URL: {{ .Values.backend.config.weatherApiBaseUrl | quote }}
+    WEATHER_API_TIMEOUT: {{ .Values.backend.config.weatherApiTimeout | quote }}
+    WEATHER_API_UNITS: {{ .Values.backend.config.weatherApiUnits | quote }}
+    CORS_ORIGINS: {{ .Values.backend.config.corsOrigins | quote }}
+    LOG_LEVEL: {{ .Values.backend.config.logLevel | quote }}
+    PORT: {{ .Values.backend.config.port | quote }}
+    GUNICORN_WORKERS: {{ .Values.backend.config.gunicornWorkers | quote }}
+    GUNICORN_THREADS: {{ .Values.backend.config.gunicornThreads | quote }}
+    GUNICORN_TIMEOUT: {{ .Values.backend.config.gunicornTimeout | quote }}
