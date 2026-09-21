@@ -1,0 +1,52 @@
+- name: Server seting for start project
+  hosts: debian-servers
+  become: true
+  
+  vars:
+    system_timezone: "Europe/Moscow"
+
+  tasks:
+    - name: apt update
+      ansible.builtin.apt:
+        name:
+          - ca-certificates     # сертификаты безопасности для проверки SSL/TLS соединений.
+          - curl                
+          - gnupg               # программа для шифрования и проверки подписей 
+          - apt-transport-https # позволяет менеджеру пакетов скачивать программы через защищенное HTTPS-соединение
+          - lsb-release         # утилита, которая помогает определить версию и название дистрибутива Linux
+          - git
+          - python3
+        update_cache: true
+        state: present
+      when: (ansible_facts['distribution'] == 'Debian')
+    
+    - name: set time zone
+      community.general.timezone:
+        name: "{{ system_timezone }}"
+
+    # Отключение swap необходимо для коректной работы kubeadm
+
+    - name:  Remove swap volume from /etc/fstab (Permanent disable)
+      ansible.posix.mount:
+        name: "{{ item }}"
+        fstype: swap
+        state: absent
+        loop:
+          - none
+          - swap
+
+    - name: Disable swap immediately
+      ansible.builtin.command:
+        - name: swapoff -a
+      when: ansible_swaptotal_mb > 0
+      changed_when: true
+    
+    # ---
+
+    - name: 
+
+           
+
+
+
+
