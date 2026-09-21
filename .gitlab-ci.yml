@@ -1,0 +1,84 @@
+variables:
+  BACKEND_IMAGE: weather-backend
+  FRONTEND_IMAGE: weather-frontend
+
+stages:
+- build
+- test
+- deploy
+
+build_backend:
+  stage: build
+  tags:
+  - build
+  - ci
+  rules:
+  - changes:
+    - backend/**/*
+    - dockerfile-backend
+    - .dockerignore
+  artifacts:
+    reports:
+      dotenv: build.env
+    expire_in: 4 hours
+  script:
+  - |
+    set -euo pipefail
+    IMAGE_TAG="${CI_COMMIT_SHORT_SHA}"
+    LOCAL_IMAGE="${BACKEND_IMAGE}:${IMAGE_TAG}"
+
+    docker build -f dockerfile-backend \
+      -t "${LOCAL_IMAGE}" \
+      -t "${BACKEND_IMAGE}:latest" \
+      .
+
+    DEPLOY_IMAGE="${BACKEND_IMAGE}"
+    if [ -n "${CI_REGISTRY:-}" ]; then
+      echo "${CI_REGISTRY_PASSWORD}" | docker login \
+        -u "${CI_REGISTRY_USER}" \
+        --password-stdin "${CI_REGISTRY}"
+      DEPLOY_IMAGE="${CI_REGISTRY_IMAGE}/backend"
+      docker tag "${LOCAL_IMAGE}" "${DEPLOY_IMAGE}:${IMAGE_TAG}"
+      docker push "${DEPLOY_IMAGE}:${IMAGE_TAG}"
+    fi
+
+    echo "BACKEND_IMAGE=${DEPLOY_IMAGE}" >> build.env
+    echo "BACKEND_IMAGE_TAG=${IMAGE_TAG}" >> build.env
+
+build_frontend:
+  stage: build
+  tags:
+  - build
+  - ci
+  rules:
+  - changes:
+    - dockerfile-frontend
+    - .dockerignore
+    - frontend/**/*
+  artifacts:
+    reports:
+      dotenv: build.env
+    expire_in: 4 hours
+  script:
+  - |
+    set -euo pipefail
+    IMAGE_TAG="${CI_COMMIT_SHORT_SHA}"
+    LOCAL_IMAGE="${FRONTEND_IMAGE}:${IMAGE_TAG}"
+
+    docker build -f dockerfile-frontend \
+      -t "${LOCAL_IMAGE}" \
+      -t "${FRONTEND_IMAGE}:latest" \
+      .
+
+    DEPLOY_IMAGE="${FRONTEND_IMAGE}"
+    if [ -n "${CI_REGISTRY:-}" ]; then
+      echo "${CI_REGISTRY_PASSWORD}" | docker login \
+        -u "${CI_REGISTRY_USER}" \
+        --password-stdin "${CI_REGISTRY}"
+      DEPLOY_IMAGE="${CI_REGISTRY_IMAGE}/frontend"
+      docker tag "${LOCAL_IMAGE}" "${DEPLOY_IMAGE}:${IMAGE_TAG}"
+      docker push "${DEPLOY_IMAGE}:${IMAGE_TAG}"
+    fi
+
+    echo "FRONTEND_IMAGE=${DEPLOY_IMAGE}" >> build.env
+    echo "FRONTEND_IMAGE_TAG=${IMAGE_TAG}" >> build.env
