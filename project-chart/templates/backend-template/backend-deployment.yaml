@@ -23,7 +23,7 @@ spec:
             containers:
               - name: weather-backend
                 image: {{ printf "%s:%s" .Values.backend.containerName .Values.backend.containerVersion }}
-                imagePullPolicy: Never
+                imagePullPolicy: {{ .Values.backend.imagePullPolicy }}
                 ports:
                     - containerPort: 5000
                 resources:

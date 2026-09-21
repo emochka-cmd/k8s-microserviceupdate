@@ -21,7 +21,7 @@ spec:
             containers:
               - name: weather-frontend
                 image: {{ printf "%s:%s" .Values.frontend.containerName .Values.frontend.containerVersion }}
-                imagePullPolicy: Never
+                imagePullPolicy: {{ .Values.frontend.imagePullPolicy }}
                 ports:
                     - name: http
                       containerPort: {{ .Values.frontend.config.listenPort }}

@@ -5,6 +5,8 @@ backend:
   replicaCount: 1
   containerName: "fff"
   containerVersion: "0.1"
+  # Never — локальная сборка на ноде. CI выставляет IfNotPresent.
+  imagePullPolicy: Never
   hpa:
     enabled: true
     minReplicas: 1
@@ -45,6 +47,8 @@ frontend:
   replicaCount: 1
   containerName: "frontend"
   containerVersion: "0.1"
+  # Never — локальная сборка на ноде. CI выставляет IfNotPresent.
+  imagePullPolicy: Never
   hpa:
     enabled: true
     minReplicas: 1
