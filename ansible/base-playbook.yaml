@@ -6,6 +6,8 @@
     system_timezone: "Europe/Moscow"
 
   tasks:
+    # Установка базовых пакетов
+
     - name: apt update
       ansible.builtin.apt:
         name:
@@ -16,13 +18,21 @@
           - lsb-release         # утилита, которая помогает определить версию и название дистрибутива Linux
           - git
           - python3
+          - python3-apt
         update_cache: true
         state: present
-      when: (ansible_facts['distribution'] == 'Debian')
+      when: ansible_facts['os_family'] == 'Debian'
     
+    # -----
+
+    # Настройка timezone
+
     - name: set time zone
       community.general.timezone:
         name: "{{ system_timezone }}"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # ----
 
     # Отключение swap необходимо для коректной работы kubeadm
 
@@ -31,20 +41,61 @@
         name: "{{ item }}"
         fstype: swap
         state: absent
-        loop:
-          - none
-          - swap
+      loop:
+        - none
+        - swap
+      when: ansible_facts['os_family'] == 'Debian'
 
     - name: Disable swap immediately
-      ansible.builtin.command:
-        - name: swapoff -a
-      when: ansible_swaptotal_mb > 0
+      ansible.builtin.command: swapoff -a
+      when: 
+        - ansible_swaptotal_mb > 0
+        - ansible_facts['os_family'] == 'Debian'
       changed_when: true
+      
     
     # ---
 
-    - name: 
+    # Настройка подключаемых модулей ядра 
+    
+    - name: Persist config overlay and br_netfilter 
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Debian'
+    
+    - name: Load overlay and br_netfilter now
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+      when: ansible_facts['os_family'] == 'Debian'
 
+    # -----
+
+    # Работа с sysctl
+
+    - name: Enable routing
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value  }}"
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        state: present
+        reload: true
+      loop:
+        - { key: 'net.bridge.bridge-nf-call-iptables', value: '1'}
+        - { key: 'net.bridge.bridge-nf-call-ip6tables', value: '1'}
+        - { key: 'net.ipv4.ip_forward', value: 1}
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # -----
            
 
 
