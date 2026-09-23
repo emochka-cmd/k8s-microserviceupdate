@@ -1,0 +1,222 @@
+- name: Server setting for start project
+  hosts: debian-servers
+  become: true
+  
+  vars:
+    system_timezone: "Europe/Moscow"
+    kubernetes_version: "1.36"
+
+  tasks:
+    # Установка базовых пакетов
+
+    - name: apt update
+      ansible.builtin.apt:
+        name:
+          - ca-certificates     # сертификаты безопасности для проверки SSL/TLS соединений.
+          - curl                
+          - gnupg               # программа для шифрования и проверки подписей 
+          - apt-transport-https # позволяет менеджеру пакетов скачивать программы через защищенное HTTPS-соединение
+          - lsb-release         # утилита, которая помогает определить версию и название дистрибутива Linux
+          - git
+          - iptables
+          - iproute2
+          - ethtool
+          - conntrack
+          - socat
+          - chrony
+          - tzdata
+          - python3
+          - python3-apt
+          - python3-debian
+        update_cache: true
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+    
+    # -----
+
+    # Настройка timezone
+
+    - name: set timezone
+      community.general.timezone:
+        name: "{{ system_timezone }}"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Enable chrony
+      ansible.builtin.systemd_service:
+        name: chrony
+        state: started
+        enabled: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # ----
+
+    # Отключение swap необходимо для коректной работы kubeadm
+
+    - name: Comment swap entries in /etc/fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#\n].*\sswap\s+.*)$'
+        replace: '# \1'
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Disable swap immediately
+      ansible.builtin.command: swapoff -a
+      register: swapoff_result
+      changed_when: false
+      when: 
+        - ansible_facts['os_family'] == 'Debian'
+        - ansible_swaptotal_mb > 0
+
+    # ---
+
+    # Настройка подключаемых модулей ядра 
+    
+    - name: Persist overlay and br_netfilter 
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Debian'
+    
+    - name: Load overlay and br_netfilter
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # -----
+
+    # Работа с sysctl
+
+    - name: Enable bridge netfilter and IPv4 forwarding
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value  }}"
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        state: present
+        reload: true
+      loop:
+        - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+        - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+        - { key: "net.ipv4.ip_forward", value: "1" }
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # -----
+
+    # Установка containerd, настройка cgroups и включение 
+
+    - name: Install containerd 
+      ansible.builtin.apt:
+        name: 
+          - containerd
+          - runc
+        update_cache: true
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Ensure /etc/containerd exist
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: ansible_facts['os_family'] == 'Debian'
+    
+    - name: Generate default containerd config and save in container_default_config
+      ansible.builtin.command: containerd config default
+      register: containerd_default_config
+      changed_when: false
+      check_mode: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Write containerd config.toml
+      ansible.builtin.copy:
+        dest: /etc/containerd/config.toml
+        content: "{{ containerd_default_config.stdout | regex_replace('SystemdCgroup = false', 'SystemdCgroup = true') }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart containerd
+    
+    - name: Containerd - start and add in systemd  
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: started
+        enabled: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # -----
+
+    # Подключение репозиториев для k8s
+    - name: Create keyrings dir
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Get Kubernetes key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Add k8s repo in format DEB822
+      ansible.builtin.deb822_repository:
+        name: kubernetes
+        types: deb
+        uris: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/"
+        suites: /
+        signed_by: "/etc/apt/keyrings/kubernetes-apt-keyring.asc"
+        state: present
+        enabled: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # ------
+
+    # Установка kubelet kubeadm kubectl
+    - name: Install kubelet kubeadm kubectl
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Hold kubernetes packages
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+      when: ansible_facts['os_family'] == 'Debian'
+        
+    # ---- 
+           
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted
+        
+  
+
+
+
