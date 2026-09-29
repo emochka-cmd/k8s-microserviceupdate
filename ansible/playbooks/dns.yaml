@@ -1,0 +1,49 @@
+- name: Configure DNS
+  hosts: all
+  become: true
+
+  vars:
+    network_dns: "{{ ansible_facts['default_ipv4']['gateway'] }}"
+    dns_servers:
+      - "{{ network_dns }}"
+      - 8.8.8.8
+      - 1.1.1.1
+
+  tasks:
+    - name: Ensure resolvconf directory exists
+      ansible.builtin.file:
+        path: /etc/resolvconf/resolv.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # libc читает /etc/resolv.conf. Это должна быть ссылка на файл, который собирает resolvconf.
+    - name: Ensure /etc/resolv.conf is managed by resolvconf
+      ansible.builtin.file:
+        src: ../run/resolvconf/resolv.conf
+        dest: /etc/resolv.conf
+        state: link
+        force: true
+
+    - name: Write nameservers to resolvconf
+      ansible.builtin.copy:
+        dest: /etc/resolvconf/resolv.conf.d/base
+        content: |
+          nameserver {{ dns_servers[0] }}
+          nameserver {{ dns_servers[1] }}
+          nameserver {{ dns_servers[2] }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    # update.d/libc добавляет resolv.conf.d/base в список и пишет nameserver в /run/resolvconf/resolv.conf
+    - name: Update resolv.conf
+      ansible.builtin.command: resolvconf -u
+      changed_when: false
+
+    - name: Check nameservers are present in /etc/resolv.conf
+      ansible.builtin.command:
+        cmd: grep -qxF "nameserver {{ item }}" /etc/resolv.conf
+      loop: "{{ dns_servers }}"
+      changed_when: false

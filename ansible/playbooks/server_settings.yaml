@@ -1,5 +1,5 @@
-- name: Server setting for start project
-  hosts: debian-servers
+- name: Server setting for any server
+  hosts: all
   become: true
   
   vars:
@@ -110,16 +110,88 @@
 
     # -----
 
-    # Установка containerd, настройка cgroups и включение 
+    # Удаление стандартных репо, с которыми могут возникнуть проблемы
 
-    - name: Install containerd 
+    - name: Removing conflicting packages
       ansible.builtin.apt:
-        name: 
+        name:
           - containerd
           - runc
-        update_cache: true
-        state: present
+        state: absent
+        purge: true
       when: ansible_facts['os_family'] == 'Debian'
+    
+    # ----
+
+
+    # Создание keyring директории и добавление необходимых репо
+
+    - name: Create keyrings dir
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Get Docker key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Get Kubernetes key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Add Docker repo in format DEB822
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: https://download.docker.com/linux/debian
+        suites: "{{ ansible_distribution_release }}"
+        components: stable
+        architectures: "{{ ansible_facts['architecture'] | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}"
+        signed_by: /etc/apt/keyrings/docker.asc
+        state: present
+        enabled: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Add k8s repo in format DEB822
+      ansible.builtin.deb822_repository:
+        name: kubernetes
+        types: deb
+        uris: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/"
+        suites: /
+        signed_by: "/etc/apt/keyrings/kubernetes-apt-keyring.asc"
+        state: present
+        enabled: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    # ------
+
+    # Установка containerd 
+
+    - name: Install containerd.io
+      ansible.builtin.apt:
+        name: containerd.io
+        state: present
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+      notify: Enable containerd
+
+    # -----
+
+    # Настройка cgroups для containerd
 
     - name: Ensure /etc/containerd exist
       ansible.builtin.file:
@@ -145,49 +217,12 @@
         group: root
         mode: "0644"
       notify: Restart containerd
-    
-    - name: Containerd - start and add in systemd  
-      ansible.builtin.systemd_service:
-        name: containerd
-        state: started
-        enabled: true
-      when: ansible_facts['os_family'] == 'Debian'
-
-    # -----
-
-    # Подключение репозиториев для k8s
-    - name: Create keyrings dir
-      ansible.builtin.file:
-        path: /etc/apt/keyrings
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-      when: ansible_facts['os_family'] == 'Debian'
-
-    - name: Get Kubernetes key
-      ansible.builtin.get_url:
-        url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
-        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
-        owner: root
-        group: root
-        mode: "0644"
-      when: ansible_facts['os_family'] == 'Debian'
-
-    - name: Add k8s repo in format DEB822
-      ansible.builtin.deb822_repository:
-        name: kubernetes
-        types: deb
-        uris: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/"
-        suites: /
-        signed_by: "/etc/apt/keyrings/kubernetes-apt-keyring.asc"
-        state: present
-        enabled: true
       when: ansible_facts['os_family'] == 'Debian'
 
     # ------
 
     # Установка kubelet kubeadm kubectl
+    
     - name: Install kubelet kubeadm kubectl
       ansible.builtin.apt:
         name:
@@ -211,6 +246,12 @@
     # ---- 
            
   handlers:
+    - name: Enable containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: started
+        enabled: true
+
     - name: Restart containerd
       ansible.builtin.systemd_service:
         name: containerd
