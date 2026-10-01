@@ -54,6 +54,20 @@
     delay: 5
     until: kubectl_nodes.rc == 0
 
+  - name: Check Calico DaemonSet
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - get
+        - daemonset/calico-node
+        - -n
+        - kube-system
+    environment:
+      KUBECONFIG: /etc/kubernetes/admin.conf
+    register: calico_ds
+    changed_when: false
+    failed_when: false
+
   - name: Install Calico
     ansible.builtin.command:
       argv:
@@ -65,6 +79,7 @@
       KUBECONFIG: /etc/kubernetes/admin.conf
     register: calico
     changed_when: "'created' in calico.stdout or 'configured' in calico.stdout"
+    when: calico_ds.rc != 0
 
   - name: Wait Calico
     ansible.builtin.command:
