@@ -1,0 +1,148 @@
+- name: Initialize the control plane
+  hosts: control_plane
+  become: true
+  
+  vars:
+    apiserver: '192.168.122.10'
+    cidr: '10.0.0.0/16'
+    calico_version: 'v3.32.2'
+  
+  tasks:
+    
+  - name: Check /etc/kubernetes/admin.conf
+    ansible.builtin.stat:
+      path: /etc/kubernetes/admin.conf
+    register: k8s_conf_status
+  
+  - name: Kubeadm init
+    ansible.builtin.command:
+      argv:
+        - kubeadm
+        - init
+        - --apiserver-advertise-address={{ apiserver }} # адрес на котором ip сервер принимает подключения
+        - --pod-network-cidr={{ cidr }} 
+    when: not k8s_conf_status.stat.exists
+
+  - name: Create /root/.kube
+    ansible.builtin.file:
+      path: /root/.kube
+      state: directory
+      owner: root
+      group: root
+      mode: '0700'
+
+  - name: COPY /etc/kubernetes/admin.conf > /root/.kube/admin.conf
+    ansible.builtin.copy:
+      src: /etc/kubernetes/admin.conf
+      dest: /root/.kube/config
+      remote_src: true # копирует с целевой системы, а не хостовой
+      owner: root
+      group: root
+      mode: '0600'
+
+  - name: Wait until API answers
+    ansible.builtin.command:
+      argv: 
+        - kubectl
+        - get
+        - nodes
+    environment: # создает временное переменное окружение для k8s
+      KUBECONFIG: /etc/kubernetes/admin.conf
+    register: kubectl_nodes
+    changed_when: false
+    retries: 30
+    delay: 5
+    until: kubectl_nodes.rc == 0
+
+  - name: Install Calico
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - apply
+        - -f
+        - https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml
+    environment:
+      KUBECONFIG: /etc/kubernetes/admin.conf
+    register: calico
+    changed_when: "'created' in calico.stdout or 'configured' in calico.stdout"
+
+  - name: Wait Calico
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - rollout
+        - status
+        - daemonset/calico-node
+        - -n
+        - kube-system
+        - --timeout=30s
+    environment:
+      KUBECONFIG: /etc/kubernetes/admin.conf
+    register: calico_node
+    changed_when: false
+    retries: 20
+    delay: 5
+    until: calico_node.rc == 0
+  
+  - name: Wait until the control plane node is Ready
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - get
+        - nodes
+        - -o
+        - jsonpath={.items[0].status.conditions[?(@.type=="Ready")].status}
+    environment:
+      KUBECONFIG: /etc/kubernetes/admin.conf
+    register: node_ready
+    changed_when: false
+    retries: 30
+    delay: 10
+    until: node_ready.stdout == "True"
+
+
+
+# Возможно в будущем построю иначе
+#  - name: Install Calico custom resource # нужно что бы кубер понимал специфические настройки calico
+#    ansible.builtin.command:
+#      argv:
+#        - kubectl
+#        - apply
+#        - -f
+#        - https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/v1_crd_projectcalico_org.yaml
+#      environment:
+#        KUBECONFIG: /etc/kubernetes/admin.conf
+#      register: calico_crd
+#      changed_when: "'created' in calico_crd.stdout or 'register' in calico_crd.stdout"
+#    
+#  - name: Install Calico tigera opera
+#    ansible.builtin.command:
+#      argv:
+#        - kubectl
+#        - apply
+#        - -f
+#        - https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
+#      environment:
+#        KUBECONFIG: /etc/kubernetes/admin.conf
+#      register: calico_to
+#      changed_when: "'created' in calico_to.stdout or 'configured' in calico_to.stdout"
+#
+#  - name: Wait until the Tigera operator is running
+#    ansible.builtin.command:
+#      argv:
+#        - kubectl
+#        - get
+#        - pods
+#        - -n
+#        - tigera-operator
+#        - -l
+#        - name=tigera-operator
+#        - -o
+#        - jsonpath={.items[0].status.phase}
+#    environment:
+#      KUBECONFIG: /etc/kubernetes/admin.conf
+#    register: tigera_operator
+#    changed_when: false
+#    retries: 30
+#    delay: 5
+#    until: tigera_operator.stdout == "Running"    
