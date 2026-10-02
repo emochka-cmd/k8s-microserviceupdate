@@ -1,0 +1,44 @@
+- name: Initialization work node
+  hosts: work_nodes
+  become: true
+
+  tasks:
+    - name: Check /etc/kubernetes/kubelet.conf
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Create join command to cotrole plane
+      ansible.builtin.command:
+        argv:
+          - kubeadm
+          - token
+          - create
+          - --print-join-command
+      delegate_to: k8s-controle-node 
+      run_once: true
+      register: join_command
+      changed_when: false
+
+    - name: Kubeadm join
+      ansible.builtin.command:
+        argv: "{{ join_command.stdout.split() + ['--node-name=' + inventory_hostname] }}"
+      when: not kubelet_conf.stat.exists
+    
+    - name: Wait until the worker node is Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ inventory_hostname }}"
+          - -o
+          - jsonpath={.status.conditions[?(@.type=="Ready")].status}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      delegate_to: k8s-controle-node
+      register: node_ready
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: node_ready.stdout == "True"
