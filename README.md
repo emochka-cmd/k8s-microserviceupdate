@@ -1,12 +1,26 @@
 # Weather Service
 
-HTTP-сервис текущей погоды по названию города. Система состоит из трёх процессов: stateless backend (Flask/Gunicorn), stateless frontend (Nginx + статика) и stateful Redis как backing service. Оркестрация — Kubernetes, поставка манифестов — Helm-чарт `project-chart`.
+HTTP-сервис текущей погоды по названию города. Приложение состоит из трёх процессов: stateless backend (Flask/Gunicorn), stateless frontend (Nginx + статика) и stateful Redis как backing service. Приложение ставится в Kubernetes Helm-чартом `project-chart`, сам кластер (kubeadm + containerd + Calico) поднимается Ansible-playbook'ами из `ansible/`.
 
-Назначение — учебный и операционный стенд, на котором отрабатываются практики 12-factor приложения, разделение конфига и секретов, probes, HPA и деградация при недоступности кэша. Бизнес-логика намеренно узкая: один read-only эндпоинт погоды и два служебных probe.
+Назначение — учебный и операционный стенд, на котором отрабатываются практики 12-factor приложения, разделение конфига и секретов, probes, HPA, деградация при недоступности кэша и bootstrap кластера с нуля. Бизнес-логика намеренно узкая: один read-only эндпоинт погоды и два служебных probe.
+
+## Состояние
+
+| Часть | Статус |
+|-------|--------|
+| Backend, frontend, Redis | работают |
+| Helm-чарт | ставится, `helm lint` чистый; у backend не подключены probes |
+| Ansible | готовит Debian-ноды и поднимает кластер: 1 control plane + 1 worker, Calico |
+| CI (`.gitlab-ci.yml`) | только сборка образов |
+| Доставка образов и деплой приложения | вручную |
+
+Подробности — в разделе «Известные проблемы и что не доделано».
 
 ---
 
 ## Архитектура
+
+### Приложение
 
 ```
 клиент
@@ -33,70 +47,33 @@ frontend (Nginx :8080)
 
 Frontend не знает про OpenWeatherMap. Backend отдаёт стабильную JSON-схему; смена провайдера не должна ломать UI.
 
-Redis — attached resource, не часть процесса приложения. Если Redis недоступен в момент `GET`/`SET`, запрос погоды не падает: кэш пропускается, идём к провайдеру. Readiness при этом честно возвращает `503`, пока Redis не отвечает или не задан `WEATHER_API_KEY`.
+Redis — attached resource, не часть процесса приложения. Если Redis недоступен в момент `GET`/`SET`, запрос погоды не падает: кэш пропускается, идём к провайдеру. Эндпоинт `/readyz` при этом возвращает `503`, пока Redis не отвечает или не задан `WEATHER_API_KEY` (в чарте он пока не подключён как readinessProbe, см. «Probes»).
+
+### Кластер
+
+```
+машина с Ansible / helm / docker
+  │  ssh root@
+  ├── k8s-controle-node  192.168.122.10   control plane (kubeadm), Calico
+  └── k8s-work-node1     192.168.122.20   worker: поды приложения, том Redis /srv/redis
+```
+
+- Kubernetes `v1.36` из `pkgs.k8s.io`; `kubelet`, `kubeadm`, `kubectl` зафиксированы через `hold`.
+- Container runtime — `containerd.io` из репозитория Docker, `SystemdCgroup = true`. Docker Engine на ноды не ставится.
+- CNI — Calico `v3.32.2` (манифест `calico.yaml`), pod CIDR `10.0.0.0/16`.
+- kubeadm вешает на control plane taint `NoSchedule`, поэтому поды приложения работают на worker.
 
 ---
 
-## 12-factor
+## Быстрый старт
 
-Приложение проектируется как [12-factor app](https://12factor.net/). Ниже — не декларация намерений, а фактическое соответствие коду и чарту.
+Путь от чистых Debian-хостов до работающего UI. Детали каждого шага — в соответствующих разделах ниже.
 
-| # | Фактор | Реализация |
-|---|--------|------------|
-| I | **Codebase** | Один git-репозиторий, один деплой-артефакт (Helm release в namespace `weather-app`). Нет форков «для прода» и «для локалки». |
-| II | **Dependencies** | Python: `backend/requirements.txt`, изолируется слоем образа. Frontend: только Nginx + статика, без runtime-пакетного менеджера в контейнере. Системные пакеты хоста в runtime приложения не подразумеваются. |
-| III | **Config** | Вся конфигурация — переменные окружения (`backend/app/config.py`). В кластере несекретное — ConfigMap `backend-config`, секретное — Secret `backend-secrets`. В values чарта ключ API по умолчанию не хранится (`backend.secrets.create: false`). |
-| IV | **Backing services** | Redis и OpenWeatherMap — подключаемые ресурсы. Хост/порт/TTL/URL/таймаут задаются env. Смена Redis не требует правки кода. |
-| V | **Build, release, run** | Build: `dockerfile-backend` / `dockerfile-frontend`. Release: образ + Helm values (config + secrets + теги). Run: Gunicorn / Nginx в подах. Сборка на лету внутри пода не выполняется. |
-| VI | **Processes** | Backend и frontend — stateless. Сессии на диске пода не пишутся. Кэш и AOF живут в Redis, не в файловой системе backend-пода. |
-| VII | **Port binding** | Backend слушает `PORT` (по умолчанию 5000) через Gunicorn. Frontend — `listenPort` (8080). Сервисы Kubernetes публикуют эти порты; приложение само является HTTP-сервером, не модулем внешнего контейнера приложений. |
-| VIII | **Concurrency** | Горизонтальное масштабирование Deployment через HPA (`minReplicas`/`maxReplicas`, CPU target 50%). Внутри процесса — `GUNICORN_WORKERS` × `GUNICORN_THREADS`. Redis из этой модели выведен: `replicaCount > 1` без Redis Cluster/Sentinel даст split-brain. |
-| IX | **Disposability** | Backend стартует без обязательного Redis и без ключа API (иначе CrashLoopBackOff вместо понятного `not_ready`). Gunicorn: `graceful_timeout=30`, `timeout` из env. Контейнер работает от непривилегированного `appuser` (uid 1001). |
-| X | **Dev/prod parity** | Один и тот же Docker-образ и тот же Helm-чарт. Различие сред — values и способ поставки образа (`imagePullPolicy: Never` для локальной сборки на ноде, `IfNotPresent` предполагается в CI). |
-| XI | **Logs** | Stdout/stderr. Gunicorn: `accesslog = "-"`, `errorlog = "-"`. Формат приложения: timestamp, level, logger name, message. Сбор логов — задача платформы, не приложения. |
-| XII | **Admin processes** | Одноразовые операции (создание Secret, `helm upgrade`, отладка `kubectl exec`) выполняются вне основного процесса. В репозитории нет встроенных migrate/cron внутри backend. |
-
-Отклонения, которые нужно держать в голове:
-
-- Redis persistence через `hostPath` (`/srv/redis`) привязывает том к ноде. Это не portable volume и не HA-хранилище. Для стенда допустимо; для нескольких нод — нет.
-- Nginx-конфиг фронтенда в образе есть, но в кластере его перекрывает ConfigMap. Это удобно для смены `proxy_pass` без пересборки, ценой расхождения «образ vs runtime».
-- CI и Ansible фактор V (build/release/run) и X (parity) пока не замыкают. См. раздел «Не завершено».
-
----
-
-## Дерево репозитория
-
-```
-.
-├── backend/                      # Flask application factory
-│   ├── app/
-│   │   ├── __init__.py           # create_app, CORS, wiring cache/client
-│   │   ├── config.py             # только os.getenv
-│   │   ├── routes.py             # /weather, /healthz, /readyz
-│   │   ├── validators.py
-│   │   ├── weather_client.py     # OpenWeatherMap + retry + нормализация
-│   │   ├── cache.py              # cache-aside, деградация при RedisError
-│   │   ├── extensions.py         # ConnectionPool, ленивый connect
-│   │   └── errors.py             # JSON-ошибки, без утечки internals
-│   ├── gunicorn.conf.py
-│   ├── wsgi.py
-│   └── requirements.txt
-├── frontend/                     # статика + nginx.conf для локального образа
-├── dockerfile-backend
-├── dockerfile-frontend
-├── project-chart/                # Helm application chart
-│   ├── Chart.yaml
-│   ├── values.yaml
-│   └── templates/
-│       ├── project-namespace.yaml
-│       ├── backend-template/
-│       ├── frontend-template/
-│       └── redis-template/
-├── ansible/                      # заготовка bootstrap ноды (не готово)
-│   ├── hosts.ini
-│   └── base-playbook.yaml
-└── .gitlab-ci.yml                # заготовка pipeline (не готово)
-```
+1. Поднять кластер playbook'ами из `ansible/` в указанном порядке (раздел «Ansible»).
+2. Собрать образы и импортировать их в containerd на worker-ноде (раздел «Контейнеры»).
+3. Выполнить `helm upgrade --install`, затем создать Secret с ключом OpenWeatherMap (раздел «Kubernetes / Helm»).
+4. Поставить metrics-server, чтобы заработал HPA.
+5. Сделать `port-forward` на `svc/frontend` и открыть UI.
 
 ---
 
@@ -129,16 +106,26 @@ Redis — attached resource, не часть процесса приложени
 
 `cached: true` — ответ из Redis, провайдер не вызывался.
 
-| Код | Когда |
-|-----|--------|
-| 400 | пустое/слишком длинное/невалидное имя города |
-| 404 | провайдер не знает город; неизвестный маршрут |
-| 405 | метод не GET |
-| 500 | нет `WEATHER_API_KEY`; непойманное исключение (клиенту — generic message) |
-| 502 | провайдер недоступен, 401 по ключу, не-JSON, неожиданная форма ответа |
-| 504 | таймаут провайдера |
+Ошибки всегда отдаются JSON одного вида:
+
+```json
+{ "error": "bad_request", "message": "City name contains invalid characters" }
+```
+
+| Код | `error` | Когда |
+|-----|---------|-------|
+| 400 | `bad_request` | пустое/слишком длинное/невалидное имя города |
+| 404 | `weather_provider_error` | провайдер не знает город |
+| 404 | `not_found` | неизвестный маршрут |
+| 405 | `method_not_allowed` | метод не GET |
+| 500 | `weather_provider_error` | не задан `WEATHER_API_KEY` |
+| 500 | `internal_error` | непойманное исключение; клиенту — generic message, детали только в логе |
+| 502 | `weather_provider_error` | провайдер недоступен, 401 по ключу, не-JSON, неожиданная форма ответа |
+| 504 | `weather_provider_error` | таймаут провайдера |
 
 Повторы к провайдеру: urllib3 `Retry(total=2, backoff_factor=0.5)` на 500/502/503/504, только GET.
+
+UI для 404 и 5xx показывает собственные сообщения на русском; текст `message` из backend выводится только для остальных 4xx.
 
 ### `GET /healthz`
 
@@ -189,6 +176,20 @@ Readiness. `200` только если `cache.ping()` успешен **и** `WEA
 
 Ключ кэша: `weather:<city.strip().lower()>`.
 
+### Локальный запуск без кластера
+
+```bash
+docker run -d --name weather-redis -p 6379:6379 redis:7-alpine
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r backend/requirements.txt
+export WEATHER_API_KEY=...
+export REDIS_HOST=127.0.0.1
+cd backend && gunicorn -c gunicorn.conf.py wsgi:app
+# отладка: python wsgi.py  — только локально, не для k8s
+```
+
+Без Redis сервис тоже отвечает (кэш пропускается), но `/readyz` вернёт `503`.
+
 ---
 
 ## Контейнеры
@@ -198,29 +199,44 @@ Readiness. `200` только если `cache.ping()` успешен **и** `WEA
 - `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1` — логи сразу в stdout, pyc не пишутся в слой.
 - Зависимости ставятся до копирования кода (кэш слоя).
 - Непривилегированный `appuser:appgroup` (1001).
-- `EXPOSE 5000`, `HEALTHCHECK` на `/healthz`.
+- `EXPOSE 5000`, `HEALTHCHECK` на `/healthz`. Kubernetes `HEALTHCHECK` из образа игнорирует — probes задаются в Deployment.
 - Entrypoint: `gunicorn -c gunicorn.conf.py wsgi:app`.
 
 **frontend** (`dockerfile-frontend`, nginx:alpine):
 
 - Статика `index.html` / `app.js` / `styles.css`.
+- `default.conf` из `frontend/nginx.conf`: `listen 8080`, `/api/` → `http://backend:5000/`.
 - `EXPOSE 8080`.
-- В Kubernetes `default.conf` монтируется из ConfigMap `frontend-config`.
+- В Kubernetes `default.conf` перекрывается ConfigMap `frontend-config`; версия в ConfigMap дополнительно задаёт `proxy_http_version 1.1` и `X-Forwarded-Proto`.
 
-Сборка с корня репозитория (контекст — `.`, чтобы `COPY ./backend` / `COPY frontend` работали):
+### Сборка
+
+Сборка из корня репозитория (контекст — `.`, чтобы работали `COPY ./backend` / `COPY frontend`). Теги совпадают с дефолтами `values.yaml` (`fff:0.1`, `frontend:0.1`), поэтому чарт ставится без `--set`:
 
 ```bash
-docker build -f dockerfile-backend -t weather-backend:0.1 .
+docker build -f dockerfile-backend  -t fff:0.1 .
 docker build -f dockerfile-frontend -t frontend:0.1 .
 ```
 
-Имена и теги по умолчанию в `values.yaml`: `fff:0.1` (backend), `frontend:0.1`. `imagePullPolicy: Never` рассчитан на `docker build` на той же ноде, где kubelet. `.dockerignore` исключает чарт, git, `.env`, `secrets.yaml`.
+`.dockerignore` исключает чарт, git, `.env`, `secrets.yaml`, `*.md`.
+
+### Доставка образов на ноду
+
+В чарте `imagePullPolicy: Never`: kubelet не скачивает образ, а ищет его в локальном хранилище containerd (namespace `k8s.io`). Docker на нодах нет, и образы из `docker build` containerd не видит, поэтому их нужно импортировать на каждую worker-ноду:
+
+```bash
+docker save fff:0.1 frontend:0.1 -o weather-images.tar
+scp weather-images.tar root@192.168.122.20:/tmp/
+ssh root@192.168.122.20 'ctr -n k8s.io images import /tmp/weather-images.tar'
+```
+
+Без импорта поды остаются в `ErrImageNeverPull`. После пересборки с тем же тегом импорт нужно повторить и перезапустить Deployment, например `kubectl -n weather-app rollout restart deploy/backend-deployment`.
 
 ---
 
 ## Kubernetes / Helm
 
-Чарт: `project-chart`, type `application`, version `0.1.0`. Namespace создаётся чартом: `weather-app`.
+Чарт: `project-chart`, type `application`, version `0.1.0`. Namespace `weather-app` создаётся самим чартом.
 
 Ресурсы:
 
@@ -229,7 +245,7 @@ docker build -f dockerfile-frontend -t frontend:0.1 .
 | Namespace | `weather-app` | |
 | Deployment | `backend-deployment` | replicas из values только если HPA выключен |
 | Deployment | `frontend-deployment` | то же |
-| StatefulSet | `redis-statefull` | AOF, `hostPath` `/srv/redis` |
+| StatefulSet | `redis-statefull` | AOF, `hostPath` `/srv/redis` (`DirectoryOrCreate`) |
 | Service | `backend` | ClusterIP `:5000` |
 | Service | `frontend` | ClusterIP `:80` → target `http` (8080) |
 | Service | `redis` | headless (`clusterIP: None`) |
@@ -238,23 +254,65 @@ docker build -f dockerfile-frontend -t frontend:0.1 .
 | Secret | `backend-secrets` | чарт создаёт **только** при `backend.secrets.create=true` |
 | HPA | `backend-hpa`, `frontend-hpa` | CPU 50%, 1..3 реплики |
 
-Поставка секрета вне чарта (рекомендуемый путь):
+### Probes
+
+| Компонент | liveness | readiness |
+|-----------|----------|-----------|
+| backend | нет | нет |
+| frontend | `GET /` на порт `http` | `GET /` на порт `http` |
+| redis | `redis-cli ping` | `redis-cli ping` |
+
+У backend эндпоинты `/healthz` и `/readyz` есть, но в `backend-deployment.yaml` они не подключены. Поэтому сейчас Kubernetes считает backend-под готовым сразу после старта контейнера, даже если Redis недоступен или ключ не задан.
+
+### Доступ к кластеру
+
+Ansible не ставит Helm на ноды. `helm` и `kubectl` удобнее запускать с рабочей машины, забрав kubeconfig с control plane:
 
 ```bash
-kubectl -n weather-app create secret generic backend-secrets \
-  --from-literal=WEATHER_API_KEY='<key>' \
-  --from-literal=REDIS_PASSWORD=''
+scp root@192.168.122.10:/etc/kubernetes/admin.conf ~/.kube/weather-lab.conf
+export KUBECONFIG=~/.kube/weather-lab.conf
+kubectl get nodes
 ```
 
-`REDIS_PASSWORD` в deployment optional. Redis включает `--requirepass` только если переменная непустая.
-
-Установка:
+### Установка
 
 ```bash
 helm upgrade --install weather ./project-chart
+
+kubectl -n weather-app create secret generic backend-secrets \
+  --from-literal=WEATHER_API_KEY='<key>' \
+  --from-literal=REDIS_PASSWORD=''
+
+kubectl -n weather-app rollout status deploy/backend-deployment
 ```
 
-Проверка:
+Порядок важен:
+
+- Namespace создаёт чарт, поэтому Secret создаётся после `helm upgrade --install`. Создать namespace вручную заранее не получится: Helm откажется ставить релиз, потому что Namespace уже существует и не принадлежит релизу.
+- Пока Secret нет, backend-под висит в `CreateContainerConfigError`: `WEATHER_API_KEY` подключён через `secretKeyRef` без `optional`. Как только Secret создан, kubelet запускает контейнер сам.
+- `REDIS_PASSWORD` опционален. Redis включает `--requirepass`, только если значение непустое, и читает его только при старте. Если пароль задан, после создания Secret перезапустите Redis: `kubectl -n weather-app rollout restart statefulset/redis-statefull`.
+
+Альтернатива для стенда — дать чарту создать Secret самому. Ключ при этом попадёт в Helm release и в историю shell:
+
+```bash
+helm upgrade --install weather ./project-chart \
+  --set backend.secrets.create=true \
+  --set backend.secrets.weatherApiKey='<key>'
+```
+
+### HPA и metrics-server
+
+HPA масштабирует по CPU и без Metrics API не работает: `kubectl get hpa` показывает `<unknown>/50%`, реплик остаётся `minReplicas`. kubeadm metrics-server не ставит, Ansible и чарт — тоже. Для стенда:
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl -n kube-system patch deployment metrics-server --type=json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+
+`--kubelet-insecure-tls` нужен, потому что kubeadm выдаёт kubelet самоподписанные serving-сертификаты. Для стенда допустимо, для прода — нет.
+
+### Проверка
 
 ```bash
 kubectl -n weather-app get pods,svc,hpa
@@ -263,14 +321,129 @@ kubectl -n weather-app port-forward svc/frontend 8080:80
 # API через proxy: http://127.0.0.1:8080/api/weather/Moscow
 ```
 
-Локальный backend без кластера (нужен Redis и ключ):
+Если `kubectl` запущен на самой control plane-ноде, добавьте `--address 0.0.0.0` и открывайте `http://192.168.122.10:8080`.
+
+---
+
+## Ansible
+
+`ansible/` готовит Debian-хосты и поднимает на них kubeadm-кластер. Приложение Ansible не ставит — это задача Helm.
+
+### Inventory
+
+| Группа | Хост | Адрес |
+|--------|------|-------|
+| `control_plane` | `k8s-controle-node` | `192.168.122.10` |
+| `work_nodes` | `k8s-work-node1` | `192.168.122.20` |
+
+Подключение под `root` (`ansible_user=root`). Имя `k8s-controle-node` захардкожено в `work_node.yaml` (`delegate_to`), а адрес `192.168.122.10` — в переменной `apiserver` playbook'а control plane. При смене inventory их нужно поправить и там.
+
+### Playbook'и
+
+| Playbook | Хосты | Что делает |
+|----------|-------|------------|
+| `fix_apt_sources.yaml` | все | комментирует `/etc/apt/sources.list`, добавляет репозитории Debian и debian-security в формате deb822, `apt update` |
+| `dns.yaml` | все | переводит `/etc/resolv.conf` на resolvconf; nameservers — шлюз по умолчанию, `8.8.8.8`, `1.1.1.1` |
+| `server_settings.yaml` | все | базовые пакеты, timezone `Europe/Moscow` и chrony, отключение swap, модули `overlay`/`br_netfilter`, sysctl для k8s, репозитории Docker и Kubernetes, `containerd.io`, `kubelet`/`kubeadm`/`kubectl` |
+| `control_plan_initialization_with_calico.yaml` | `control_plane` | `kubeadm init`, kubeconfig в `/root/.kube/config`, установка Calico, ожидание `Ready` |
+| `work_node.yaml` | `work_nodes` | берёт join-команду с control plane, `kubeadm join --node-name=<inventory_hostname>`, ждёт `Ready` ноды |
+
+Ключевые шаги безопасно перезапускать: `kubeadm init` пропускается, если есть `/etc/kubernetes/admin.conf`; `kubeadm join` — если есть `/etc/kubernetes/kubelet.conf`; Calico применяется, только если нет DaemonSet `calico-node`.
+
+Версии и сеть задаются в `vars` внутри playbook'ов: `kubernetes_version: "1.36"` и `system_timezone` в `server_settings.yaml`; `apiserver`, `cidr`, `calico_version` в `control_plan_initialization_with_calico.yaml`.
+
+### Запуск
+
+Требования к хостам: Debian, SSH-доступ под root, `python3`, `python3-debian` (нужен модулю `deb822_repository` уже в первом playbook) и `resolvconf` (его использует `dns.yaml`, но ни один playbook не ставит).
 
 ```bash
-export WEATHER_API_KEY=...
-export REDIS_HOST=127.0.0.1
-pip install -r backend/requirements.txt
-cd backend && gunicorn -c gunicorn.conf.py wsgi:app
-# отладка: python wsgi.py  — только локально, не для k8s
+cd ansible
+ansible-galaxy collection install -r requirements.yml
+
+ansible-playbook -i hosts.ini playbooks/fix_apt_sources.yaml
+ansible -i hosts.ini all -m ansible.builtin.apt -a "name=resolvconf state=present"  # если resolvconf ещё нет
+ansible-playbook -i hosts.ini playbooks/dns.yaml
+ansible-playbook -i hosts.ini playbooks/server_settings.yaml
+ansible-playbook -i hosts.ini playbooks/control_plan_initialization_with_calico.yaml
+ansible-playbook -i hosts.ini playbooks/work_node.yaml
+```
+
+Проверка на control plane:
+
+```bash
+kubectl get nodes -o wide
+kubectl -n kube-system get pods
+```
+
+---
+
+## 12-factor
+
+Приложение проектируется как [12-factor app](https://12factor.net/). Ниже — не декларация намерений, а фактическое соответствие коду и чарту.
+
+| # | Фактор | Реализация |
+|---|--------|------------|
+| I | **Codebase** | Один git-репозиторий: код, Dockerfile'ы, чарт и инфраструктура. Один деплой-артефакт — Helm release в namespace `weather-app`. Нет форков «для прода» и «для локалки». |
+| II | **Dependencies** | Python: `backend/requirements.txt` с зафиксированными версиями, изолируется слоем образа. Frontend: только Nginx + статика, без runtime-пакетного менеджера в контейнере. Системные пакеты хоста в runtime приложения не подразумеваются. |
+| III | **Config** | Вся конфигурация — переменные окружения (`backend/app/config.py`). В кластере несекретное — ConfigMap `backend-config`, секретное — Secret `backend-secrets`. В values чарта ключ API по умолчанию не хранится (`backend.secrets.create: false`). |
+| IV | **Backing services** | Redis и OpenWeatherMap — подключаемые ресурсы. Хост/порт/TTL/URL/таймаут задаются env. Смена Redis не требует правки кода. |
+| V | **Build, release, run** | Build: `dockerfile-backend` / `dockerfile-frontend` (локально или в CI). Release: образ + Helm values (config + secrets + теги). Run: Gunicorn / Nginx в подах. Сборка на лету внутри пода не выполняется. |
+| VI | **Processes** | Backend и frontend — stateless. Сессии на диске пода не пишутся. Кэш и AOF живут в Redis, не в файловой системе backend-пода. |
+| VII | **Port binding** | Backend слушает `PORT` (по умолчанию 5000) через Gunicorn. Frontend — `listenPort` (8080). Сервисы Kubernetes публикуют эти порты; приложение само является HTTP-сервером, не модулем внешнего контейнера приложений. |
+| VIII | **Concurrency** | Горизонтальное масштабирование Deployment через HPA (`minReplicas`/`maxReplicas`, CPU target 50%; нужен metrics-server). Внутри процесса — `GUNICORN_WORKERS` × `GUNICORN_THREADS`. Redis из этой модели выведен: `replicaCount > 1` без Redis Cluster/Sentinel даст split-brain. |
+| IX | **Disposability** | Backend стартует без Redis и без ключа API: процесс жив, `/healthz` — `200`, `/readyz` — `503` (вместо CrashLoopBackOff). Gunicorn: `graceful_timeout=30`, `timeout` из env. Контейнер работает от непривилегированного `appuser` (uid 1001). |
+| X | **Dev/prod parity** | Один и тот же Docker-образ и тот же Helm-чарт. Различие сред — values и способ поставки образа: на стенде `imagePullPolicy: Never` и ручной импорт в containerd, в перспективе — registry и `IfNotPresent` из CI. |
+| XI | **Logs** | Stdout/stderr. Gunicorn: `accesslog = "-"`, `errorlog = "-"`. Формат приложения: timestamp, level, logger name, message. Сбор логов — задача платформы, не приложения. |
+| XII | **Admin processes** | Одноразовые операции (создание Secret, `helm upgrade`, отладка `kubectl exec`) выполняются вне основного процесса. В репозитории нет встроенных migrate/cron внутри backend. |
+
+Отклонения, которые нужно держать в голове:
+
+- Redis persistence через `hostPath` (`/srv/redis`) привязывает данные к ноде, на которую попал под (сейчас это единственный worker). Это не portable volume и не HA-хранилище. Для стенда допустимо; для нескольких worker-нод — нет.
+- Nginx-конфиг фронтенда в образе есть, но в кластере его перекрывает ConfigMap. Это удобно для смены `proxy_pass` без пересборки, ценой расхождения «образ vs runtime».
+- Readiness из фактора IX работает только на уровне HTTP: в Deployment backend probes не подключены, и Kubernetes состояние `not_ready` не видит.
+- В кластере Secret `backend-secrets` с ключом `WEATHER_API_KEY` обязателен, иначе под не стартует (`CreateContainerConfigError`). «Старт без ключа» в Kubernetes работает, только если в Secret пустое значение.
+- CI фактор V (build/release/run) и X (parity) пока не замыкает: release и run в кластер выполняются вручную.
+
+---
+
+## Дерево репозитория
+
+```
+.
+├── backend/                      # Flask application factory
+│   ├── app/
+│   │   ├── __init__.py           # create_app, CORS, wiring cache/client
+│   │   ├── config.py             # только os.getenv
+│   │   ├── routes.py             # /weather, /healthz, /readyz
+│   │   ├── validators.py
+│   │   ├── weather_client.py     # OpenWeatherMap + retry + нормализация
+│   │   ├── cache.py              # cache-aside, деградация при RedisError
+│   │   ├── extensions.py         # ConnectionPool, ленивый connect
+│   │   └── errors.py             # JSON-ошибки, без утечки internals
+│   ├── gunicorn.conf.py
+│   ├── wsgi.py
+│   └── requirements.txt
+├── frontend/                     # index.html, app.js, styles.css + nginx.conf для образа
+├── dockerfile-backend
+├── dockerfile-frontend
+├── project-chart/                # Helm application chart
+│   ├── Chart.yaml
+│   ├── values.yaml
+│   └── templates/
+│       ├── project-namespace.yaml
+│       ├── backend-template/     # deployment, service, configmap, secret, hpa
+│       ├── frontend-template/    # deployment, service, configmap, hpa
+│       └── redis-template/       # statefulset, headless service
+├── ansible/                      # подготовка нод и kubeadm-кластер
+│   ├── hosts.ini                 # control_plane + work_nodes
+│   ├── requirements.yml          # community.general, ansible.posix
+│   └── playbooks/
+│       ├── fix_apt_sources.yaml
+│       ├── dns.yaml
+│       ├── server_settings.yaml
+│       ├── control_plan_initialization_with_calico.yaml
+│       └── work_node.yaml
+└── .gitlab-ci.yml                # сборка образов (test/deploy не готовы)
 ```
 
 ---
@@ -278,7 +451,9 @@ cd backend && gunicorn -c gunicorn.conf.py wsgi:app
 ## Границы и сознательные упрощения
 
 - Один инстанс Redis, persistence на `hostPath`. Не Redis Cluster, не PVC, не anti-affinity.
+- Кластер из одной control plane-ноды и одного worker, без HA control plane.
 - Нет Ingress / TLS в чарте. Точка входа на стенде — Service + port-forward (или ручной Ingress снаружи).
+- Нет NetworkPolicy, хотя Calico их поддерживает: внутри namespace любой под может ходить в Redis.
 - Нет аутентификации пользователя. Ключ провайдера — серверный секрет.
 - Нет очередей, нет записи пользовательских данных.
 - Frontend валидирует город зеркально backend; источник истины для отказа — backend.
@@ -286,7 +461,14 @@ cd backend && gunicorn -c gunicorn.conf.py wsgi:app
 
 ---
 
-## Не завершено
+## Известные проблемы и что не доделано
+
+### Helm-чарт
+
+- У backend нет `livenessProbe` и `readinessProbe`. Нужно подключить `/healthz` и `/readyz` на порт 5000: без этого Service шлёт трафик в под, который не видит Redis или не имеет ключа.
+- Имена образов расходятся: в `values.yaml` — `fff` и `frontend`, в CI — `weather-backend` и `weather-frontend`. Комментарий в values «CI выставляет IfNotPresent» пока не соответствует действительности: CI ничего не деплоит.
+- `containerPort: 5000` в backend Deployment захардкожен и не следует за `backend.config.port`.
+- В `Chart.yaml` остались дефолты `helm create`: `description` и `appVersion: "1.16.0"` к проекту не относятся.
 
 ### CI/CD
 
@@ -303,6 +485,7 @@ cd backend && gunicorn -c gunicorn.conf.py wsgi:app
 
 - стадия `test` (линтеры, unit, контракт `/weather` и probes) — джоб нет;
 - стадия `deploy` — нет `helm upgrade`, нет проброса image/tag из dotenv в values, нет `imagePullPolicy=IfNotPresent`;
+- без registry образ остаётся в Docker на runner и до containerd на нодах не доходит;
 - нет единой сборки, если меняется только чарт;
 - нет отдельного релиза Secret (`WEATHER_API_KEY` не должен попадать в values и в git);
 - runners с тегами `build` и `ci` предполагаются, но не описаны как код инфраструктуры.
@@ -311,17 +494,16 @@ cd backend && gunicorn -c gunicorn.conf.py wsgi:app
 
 ### Ansible
 
-`ansible/hosts.ini` + `ansible/base-playbook.yaml` — черновик bootstrap Debian-ноды под последующий kubeadm, не рабочий playbook.
+Сделано: путь от чистого Debian до кластера из двух нод — apt-репозитории, DNS, подготовка ядра и sysctl, containerd, kubeadm init с Calico, join worker. Коллекции `community.general` и `ansible.posix` зафиксированы в `requirements.yml`. Все playbook'и проходят `ansible-playbook --syntax-check`.
 
-Сделано по смыслу: inventory (`debian01`, `192.168.122.100`, `ansible_user=root`), apt-пакеты для Debian, timezone `Europe/Moscow`, намерение отключить swap.
+Не сделано:
 
-Не сделано / сломано:
+- `resolvconf` и `python3-debian` нужны playbook'ам, но ими не ставятся;
+- нет общего playbook (`site.yaml`), который запускает шаги в правильном порядке;
+- не ставятся Helm и metrics-server;
+- нет доставки образов на ноды (`ctr images import`) и `helm upgrade`;
+- нет идемпотентного создания Secret `backend-secrets`;
+- `work_node.yaml` создаёт новый bootstrap-токен при каждом запуске, даже если нода уже в кластере;
+- версии, CIDR и адрес API-сервера заданы в `vars` внутри playbook'ов, а не в `group_vars`.
 
-- синтаксис задач swap (`loop` у `mount`, `command` для `swapoff`) не доведён;
-- последняя задача пустая;
-- нет установки container runtime, kubeadm/kubelet/kubectl, инициализации кластера, CNI;
-- нет копирования/сборки образов на ноду и `helm upgrade`;
-- нет идемпотентного создания namespace/Secret;
-- community-коллекции (`community.general`, `ansible.posix`) не зафиксированы.
-
-Итог: Ansible не поднимает ни хост k8s, ни приложение. После доводки playbook должен закрывать подготовку ноды; поставка приложения остаётся за Helm (+ CI).
+Итог: Ansible закрывает подготовку кластера; поставка приложения остаётся ручной (импорт образов + Helm), пока CI не дойдёт до deploy.
