@@ -26,6 +26,18 @@ spec:
                 imagePullPolicy: {{ .Values.backend.imagePullPolicy }}
                 ports:
                     - containerPort: 5000
+                livenessProbe:
+                    httpGet:
+                        path: /healthz
+                        port: 5000
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                readinessProbe:
+                    httpGet:
+                        path: /readyz
+                        port: 5000
+                    initialDelaySeconds: 3
+                    periodSeconds: 5
                 resources:
                     requests:
                         cpu: {{ .Values.backend.resources.requests.cpu }}
