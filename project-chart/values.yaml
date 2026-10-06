@@ -3,7 +3,7 @@ namespace:
 
 backend:
   replicaCount: 1
-  containerName: "fff"
+  containerName: "weather-backend"
   containerVersion: "0.1"
   # Never — локальная сборка на ноде. CI выставляет IfNotPresent.
   imagePullPolicy: Never
@@ -45,7 +45,7 @@ backend:
 
 frontend:
   replicaCount: 1
-  containerName: "frontend"
+  containerName: "weather-frontend"
   containerVersion: "0.1"
   # Never — локальная сборка на ноде. CI выставляет IfNotPresent.
   imagePullPolicy: Never

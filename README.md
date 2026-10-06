@@ -9,7 +9,7 @@ HTTP-сервис текущей погоды по названию города
 | Часть | Статус |
 |-------|--------|
 | Backend, frontend, Redis | работают |
-| Helm-чарт | ставится, `helm lint` чистый; у backend не подключены probes |
+| Helm-чарт | ставится, `helm lint` чистый; probes backend смотрят на `/healthz` и `/readyz` |
 | Ansible | готовит Debian-ноды и поднимает кластер: 1 control plane + 1 worker, Calico |
 | CI (`.gitlab-ci.yml`) | только сборка образов |
 | Доставка образов и деплой приложения | вручную |
@@ -47,7 +47,7 @@ frontend (Nginx :8080)
 
 Frontend не знает про OpenWeatherMap. Backend отдаёт стабильную JSON-схему; смена провайдера не должна ломать UI.
 
-Redis — attached resource, не часть процесса приложения. Если Redis недоступен в момент `GET`/`SET`, запрос погоды не падает: кэш пропускается, идём к провайдеру. Эндпоинт `/readyz` при этом возвращает `503`, пока Redis не отвечает или не задан `WEATHER_API_KEY` (в чарте он пока не подключён как readinessProbe, см. «Probes»).
+Redis — attached resource, не часть процесса приложения. Если Redis недоступен в момент `GET`/`SET`, запрос погоды не падает: кэш пропускается, идём к провайдеру. Эндпоинт `/readyz` при этом возвращает `503`, пока Redis не отвечает или не задан `WEATHER_API_KEY`. В Deployment этот эндпоинт подключён как readinessProbe, поэтому Service не шлёт трафик в под, пока он не готов.
 
 ### Кластер
 
@@ -147,7 +147,7 @@ Readiness. `200` только если `cache.ping()` успешен **и** `WEA
 }
 ```
 
-Если ключа нет при старте, процесс не убивается: под поднимается, `/healthz` зелёный, `/readyz` красный. Это сознательно, чтобы в Kubernetes было `not_ready`, а не CrashLoopBackOff.
+Если ключа нет при старте, процесс не убивается: `/healthz` зелёный, `/readyz` красный. ReadinessProbe переводит под в `NotReady`, а не в CrashLoopBackOff. В кластере это срабатывает, только когда Secret `backend-secrets` уже существует и ключ в нём пустой. Пока объекта Secret нет, контейнер не стартует (`CreateContainerConfigError`), и probes не выполняются.
 
 ---
 
@@ -202,8 +202,9 @@ cd backend && gunicorn -c gunicorn.conf.py wsgi:app
 - `EXPOSE 5000`, `HEALTHCHECK` на `/healthz`. Kubernetes `HEALTHCHECK` из образа игнорирует — probes задаются в Deployment.
 - Entrypoint: `gunicorn -c gunicorn.conf.py wsgi:app`.
 
-**frontend** (`dockerfile-frontend`, nginx:alpine):
+**frontend** (`dockerfile-frontend`, `nginxinc/nginx-unprivileged:alpine`):
 
+- Процесс Nginx работает от непривилегированного пользователя и слушает 8080, а не 80.
 - Статика `index.html` / `app.js` / `styles.css`.
 - `default.conf` из `frontend/nginx.conf`: `listen 8080`, `/api/` → `http://backend:5000/`.
 - `EXPOSE 8080`.
@@ -211,11 +212,11 @@ cd backend && gunicorn -c gunicorn.conf.py wsgi:app
 
 ### Сборка
 
-Сборка из корня репозитория (контекст — `.`, чтобы работали `COPY ./backend` / `COPY frontend`). Теги совпадают с дефолтами `values.yaml` (`fff:0.1`, `frontend:0.1`), поэтому чарт ставится без `--set`:
+Сборка из корня репозитория (контекст — `.`, чтобы работали `COPY ./backend` / `COPY frontend`). Теги совпадают с дефолтами `values.yaml` (`weather-backend:0.1`, `weather-frontend:0.1`) и с именами образов в CI, поэтому чарт ставится без `--set`:
 
 ```bash
-docker build -f dockerfile-backend  -t fff:0.1 .
-docker build -f dockerfile-frontend -t frontend:0.1 .
+docker build -f dockerfile-backend  -t weather-backend:0.1 .
+docker build -f dockerfile-frontend -t weather-frontend:0.1 .
 ```
 
 `.dockerignore` исключает чарт, git, `.env`, `secrets.yaml`, `*.md`.
@@ -225,7 +226,7 @@ docker build -f dockerfile-frontend -t frontend:0.1 .
 В чарте `imagePullPolicy: Never`: kubelet не скачивает образ, а ищет его в локальном хранилище containerd (namespace `k8s.io`). Docker на нодах нет, и образы из `docker build` containerd не видит, поэтому их нужно импортировать на каждую worker-ноду:
 
 ```bash
-docker save fff:0.1 frontend:0.1 -o weather-images.tar
+docker save weather-backend:0.1 weather-frontend:0.1 -o weather-images.tar
 scp weather-images.tar root@192.168.122.20:/tmp/
 ssh root@192.168.122.20 'ctr -n k8s.io images import /tmp/weather-images.tar'
 ```
@@ -258,11 +259,11 @@ ssh root@192.168.122.20 'ctr -n k8s.io images import /tmp/weather-images.tar'
 
 | Компонент | liveness | readiness |
 |-----------|----------|-----------|
-| backend | нет | нет |
+| backend | `GET /healthz` на порт 5000 | `GET /readyz` на порт 5000 |
 | frontend | `GET /` на порт `http` | `GET /` на порт `http` |
 | redis | `redis-cli ping` | `redis-cli ping` |
 
-У backend эндпоинты `/healthz` и `/readyz` есть, но в `backend-deployment.yaml` они не подключены. Поэтому сейчас Kubernetes считает backend-под готовым сразу после старта контейнера, даже если Redis недоступен или ключ не задан.
+Пока `/readyz` возвращает `503`, под backend остаётся `NotReady`, и Service на него не шлёт трафик. Так бывает, если Redis не отвечает или в Secret пустой `WEATHER_API_KEY`. Liveness при этом остаётся зелёной: процесс жив, Kubernetes его не перезапускает.
 
 ### Доступ к кластеру
 
@@ -276,12 +277,15 @@ kubectl get nodes
 
 ### Установка
 
+Релиз Helm называется `weather` и по умолчанию записывается в namespace `default`. Объекты приложения чарт создаёт в `weather-app`.
+
+Ключ лежит в `.env` в корне репозитория. Файл в `.gitignore`, в образ не попадает (`.dockerignore`). Обязательна строка `WEATHER_API_KEY`; `REDIS_PASSWORD` можно не указывать.
+
 ```bash
 helm upgrade --install weather ./project-chart
 
 kubectl -n weather-app create secret generic backend-secrets \
-  --from-literal=WEATHER_API_KEY='<key>' \
-  --from-literal=REDIS_PASSWORD=''
+  --from-env-file=.env
 
 kubectl -n weather-app rollout status deploy/backend-deployment
 ```
@@ -291,6 +295,7 @@ kubectl -n weather-app rollout status deploy/backend-deployment
 - Namespace создаёт чарт, поэтому Secret создаётся после `helm upgrade --install`. Создать namespace вручную заранее не получится: Helm откажется ставить релиз, потому что Namespace уже существует и не принадлежит релизу.
 - Пока Secret нет, backend-под висит в `CreateContainerConfigError`: `WEATHER_API_KEY` подключён через `secretKeyRef` без `optional`. Как только Secret создан, kubelet запускает контейнер сам.
 - `REDIS_PASSWORD` опционален. Redis включает `--requirepass`, только если значение непустое, и читает его только при старте. Если пароль задан, после создания Secret перезапустите Redis: `kubectl -n weather-app rollout restart statefulset/redis-statefull`.
+- `--from-literal` на командной строке оставляет ключ в истории shell. `--from-env-file` этого не делает.
 
 Альтернатива для стенда — дать чарту создать Secret самому. Ключ при этом попадёт в Helm release и в историю shell:
 
@@ -400,7 +405,7 @@ kubectl -n kube-system get pods
 
 - Redis persistence через `hostPath` (`/srv/redis`) привязывает данные к ноде, на которую попал под (сейчас это единственный worker). Это не portable volume и не HA-хранилище. Для стенда допустимо; для нескольких worker-нод — нет.
 - Nginx-конфиг фронтенда в образе есть, но в кластере его перекрывает ConfigMap. Это удобно для смены `proxy_pass` без пересборки, ценой расхождения «образ vs runtime».
-- Readiness из фактора IX работает только на уровне HTTP: в Deployment backend probes не подключены, и Kubernetes состояние `not_ready` не видит.
+- ReadinessProbe backend смотрит на `/readyz`. Пока Redis недоступен или ключ пустой, под `NotReady` и не получает трафик. Если объекта Secret нет совсем, контейнер не стартует раньше probes.
 - В кластере Secret `backend-secrets` с ключом `WEATHER_API_KEY` обязателен, иначе под не стартует (`CreateContainerConfigError`). «Старт без ключа» в Kubernetes работает, только если в Secret пустое значение.
 - CI фактор V (build/release/run) и X (parity) пока не замыкает: release и run в кластер выполняются вручную.
 
@@ -465,9 +470,8 @@ kubectl -n kube-system get pods
 
 ### Helm-чарт
 
-- У backend нет `livenessProbe` и `readinessProbe`. Нужно подключить `/healthz` и `/readyz` на порт 5000: без этого Service шлёт трафик в под, который не видит Redis или не имеет ключа.
-- Имена образов расходятся: в `values.yaml` — `fff` и `frontend`, в CI — `weather-backend` и `weather-frontend`. Комментарий в values «CI выставляет IfNotPresent» пока не соответствует действительности: CI ничего не деплоит.
-- `containerPort: 5000` в backend Deployment захардкожен и не следует за `backend.config.port`.
+- Имена образов в `values.yaml` совпадают с CI: `weather-backend` и `weather-frontend`, тег `0.1`. Комментарий в values «CI выставляет IfNotPresent» по-прежнему не соответствует действительности: CI ничего не деплоит, в чарте остаётся `imagePullPolicy: Never`.
+- `containerPort: 5000` в backend Deployment захардкожен и не следует за `backend.config.port`. То же у `livenessProbe` и `readinessProbe`: порт `5000` не берётся из `backend.config.port`.
 - В `Chart.yaml` остались дефолты `helm create`: `description` и `appVersion: "1.16.0"` к проекту не относятся.
 
 ### CI/CD
